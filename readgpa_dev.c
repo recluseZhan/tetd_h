@@ -9,6 +9,7 @@ MODULE_LICENSE("GPL");
 #define DEVNAME "readgpa_dev"
 
 extern void read_func(void);
+extern void write_func(uint64_t gva);
 
 // open dev
 static int readgpa_dev_open(struct inode *inode, struct file *filp) 
@@ -28,7 +29,12 @@ static ssize_t readgpa_dev_read(struct file *filp, char __user *buf, size_t size
 } 
 // write dev
 static ssize_t readgpa_dev_write(struct file *filp, const char __user *buf, size_t size, loff_t *offset) 
-{  	
+{  
+    uint64_t write_buffer[1];
+    uint64_t gva;
+    copy_from_user(write_buffer, buf, size);
+    gva = write_buffer[0];
+    write_func(gva);
     return 0; 
 } 
 
