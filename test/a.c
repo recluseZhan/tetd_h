@@ -9,8 +9,8 @@ void main(){
     unsigned long a[1] = {0xff4bb0010784b000};
     fd = open(DEVNAME,O_RDWR);
     printf("fd:%d\n",fd);
-    write(fd,&a[0],sizeof(a[0]));
-    //read(fd,a,sizeof(a));
+    //write(fd,&a[0],sizeof(a[0]));
+    read(fd,a,sizeof(a));
     close(fd);  
     return 0;
 }

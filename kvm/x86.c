@@ -85,6 +85,8 @@
 #include <asm/emulate_prefix.h>
 #include <asm/sgx.h>
 #include <clocksource/hyperv_timer.h>
+//
+#include <asm/kvm_page_track.h>
 
 #define CREATE_TRACE_POINTS
 #include "trace.h"
@@ -10114,7 +10116,75 @@ static int complete_hypercall_exit(struct kvm_vcpu *vcpu)
 	++vcpu->stat.hypercalls;
 	return kvm_skip_emulated_instruction(vcpu);
 }
+//xin
+typedef struct ept_entry {
+    phys_addr_t hpa : 52;      
+    unsigned int read_access : 1;
+    unsigned int write_access : 1;
+    unsigned int exec_access : 1;
+} ept_entry_t;
+ept_entry_t *kvm_vcpu_map_ept(struct kvm *kvm, gpa_t gpa, phys_addr_t hpa);
+static inline int gpa_index(gpa_t gpa, int level)
+{
+    return (gpa >> (PAGE_SHIFT + (level * 9))) & 0x1FF;
+}
 
+static phys_addr_t alloc_ept_page(void)
+{
+    struct page *page = alloc_pages(GFP_KERNEL, 0);
+    if (!page)
+        return ~(phys_addr_t)0;
+
+    return page_to_phys(page);
+}
+
+static phys_addr_t get_eptp(void)
+{
+    phys_addr_t eptp;
+    asm volatile("vmread %%rax, %0\n\t" : "=r"(eptp) : "a"(EPT_POINTER)); 
+    return eptp;
+}
+
+ept_entry_t *kvm_vcpu_map_ept(struct kvm *kvm, gpa_t gpa, phys_addr_t hpa)
+{
+    phys_addr_t *table;
+    phys_addr_t next_hpa = get_eptp();  
+    int level, index;
+
+    if (next_hpa == ~(phys_addr_t)0) {
+        printk(KERN_ERR "Failed to retrieve EPTP\n");
+        return NULL;
+    }
+
+    for (level = 3; level >= 1; --level) {
+        table = (phys_addr_t *)phys_to_virt(next_hpa);
+        index = gpa_index(gpa, level);
+        next_hpa = table[index];
+
+        if (next_hpa == 0) {
+            next_hpa = alloc_ept_page();
+            if (next_hpa == ~(phys_addr_t)0) {
+                printk(KERN_ERR "Failed to allocate new EPT page at level %d\n", level);
+                return NULL;
+            }
+
+            memset((void *)phys_to_virt(next_hpa), 0, PAGE_SIZE);
+            table[index] = next_hpa | 0x7;  
+        }
+    }
+
+    table = (phys_addr_t *)phys_to_virt(next_hpa);
+    index = gpa_index(gpa, 0);
+    ept_entry_t *ept_entry = (ept_entry_t *)&table[index];
+
+    ept_entry->hpa = hpa >> PAGE_SHIFT;
+    ept_entry->read_access = 1;
+    ept_entry->write_access = 1;
+    ept_entry->exec_access = 1;
+
+    return ept_entry;
+}
+//
 unsigned long __kvm_emulate_hypercall(struct kvm_vcpu *vcpu, unsigned long nr,
 				      unsigned long a0, unsigned long a1,
 				      unsigned long a2, unsigned long a3,
@@ -10122,7 +10192,9 @@ unsigned long __kvm_emulate_hypercall(struct kvm_vcpu *vcpu, unsigned long nr,
 {
         //xin
 	//printk(KERN_INFO "kvm_emulate_hy");
-	//
+        phys_addr_t map_hpa;
+	gpa_t map_gpa;
+        //
 
 	unsigned long ret;
 
@@ -10207,6 +10279,15 @@ unsigned long __kvm_emulate_hypercall(struct kvm_vcpu *vcpu, unsigned long nr,
 	default:
 	        //xin
                 printk(KERN_INFO "hypercall!!!\n");
+                map_hpa = a0; 
+                map_gpa = a1;         
+
+                ept_entry_t *entry = kvm_vcpu_map_ept(vcpu->kvm, map_gpa, map_hpa);
+                if (entry) {
+                    printk(KERN_INFO "Mapped GPA 0x%llx to HPA 0x%llx\n", map_gpa, map_hpa);
+                } else {
+                    printk(KERN_ERR "Failed to map GPA 0x%llx\n", map_gpa);
+                } 
                 //
 		ret = -KVM_ENOSYS;
 		break;
