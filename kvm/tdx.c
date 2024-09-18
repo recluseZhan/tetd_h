@@ -1424,7 +1424,27 @@ static int handle_tdvmcall(struct kvm_vcpu *vcpu)
 	//
 	if (tdvmcall_exit_type(vcpu)){
 		//xin
-		printk(KERN_INFO "qqq\n");
+		//printk(KERN_INFO "qqq\n");
+                gpa_t gpa = 0x1000;
+                kvm_pfn_t pfn;
+                phys_addr_t hpa;
+                //void *hva;
+                gfn_t gfn = gpa >> PAGE_SHIFT;    
+                pfn = gfn_to_pfn(vcpu->kvm, gfn);
+                if (is_error_noslot_pfn(pfn)) {
+                    pr_err("Failed to get PFN for GPA: 0x%llx\n", gpa);
+                    return -EFAULT;
+                }    
+
+                hpa = pfn_to_hpa(pfn);
+                pr_info("GPA 0x%llx is mapped to HPA 0x%llx\n", gpa, hpa);
+        
+                hva_t hva = gfn_to_hva(vcpu->kvm, gfn);
+                if (kvm_is_error_hva(hva)) {
+                    pr_err("GPA to HVA mapping failed for GPA: 0x%llx\n", gpa);
+                    return -EFAULT;
+                }
+                pr_info("GPA: 0x%llx -> HVA: 0x%lx\n", gpa, hva);
 		//
 		return tdx_emulate_vmcall(vcpu);}
         
@@ -1466,7 +1486,7 @@ static int handle_tdvmcall(struct kvm_vcpu *vcpu)
 		return tdx_get_td_vm_call_info(vcpu);
 	default:
 		//xin
-          //      printk(KERN_INFO "DEFULT!!!\n");
+                printk(KERN_INFO "DEFULT!!!\n");
                 //
 		break;
 	}

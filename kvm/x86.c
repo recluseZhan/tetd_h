@@ -10300,12 +10300,13 @@ static int map_gpa_to_hpa(struct kvm_vcpu *vcpu, unsigned long gpa, unsigned lon
 #define EPT_EXEC  (1ull << 2)
 
 // 用于逐级查询 EPT 页表，并最终返回 PTE 地址
-static u64 *get_ept_pte(struct kvm_vcpu *vcpu, u64 gpa) {
+static u64 get_ept_pte(struct kvm_vcpu *vcpu, u64 gpa) {
     u64 root_hpa = vcpu->arch.mmu->root.hpa; // EPT 根表物理地址
-    u64 *eptrt = ioremap(root_hpa,PAGE_SIZE);     // 将 EPT 根表物理地址转为虚拟地址
+    u64 *eptrt = phys_to_virt(root_hpa);     // 将 EPT 根表物理地址转为虚拟地址
     int level = 4;                           // EPT 是四级页表
     u64 *pte = eptrt;
-
+    printk(KERN_INFO "eptp %llx eptrt%p *eptp%llx",root_hpa,eptrt,*eptrt);
+    
     // 逐级查询 EPT 页表
     for (; level > 1; level--) {
         int index = (gpa >> (12 + (level - 1) * 9)) & 0x1ff;  // 每级的索引
@@ -10316,7 +10317,7 @@ static u64 *get_ept_pte(struct kvm_vcpu *vcpu, u64 gpa) {
 	    u64 new_hpa = __get_free_page(GFP_KERNEL);
 	    if(!new_hpa){
 	        printk(KERN_ERR "failed to alloc new hpa for gpa 0x%llx\n", gpa);
-		return NULL;
+		return 0;
 	    }
 	    pte[index] = virt_to_phys((void *)new_hpa) | EPT_READ | EPT_WRITE | EPT_EXEC;
 	    pte_val = pte[index];
@@ -10324,12 +10325,13 @@ static u64 *get_ept_pte(struct kvm_vcpu *vcpu, u64 gpa) {
 
         // 获取下一级页表的物理地址
         u64 next_level_hpa = pte_val & PAGE_MASK;
-	iounmap(pte);
-        pte = ioremap(next_level_hpa,PAGE_SIZE);  // 转换为虚拟地址以供访问
+        pte = phys_to_virt(next_level_hpa);  // 转换为虚拟地址以供访问
     }
 
     // 返回最后一级页表项
-    return &pte[(gpa >> 12) & 0x1ff];
+    return pte[(gpa >> 12) & 0x1ff];
+    
+   
 }/*
 static void ept_update_mapping(struct kvm_vcpu *vcpu, u64 gpa, u64 hpa) {
     u64 *ept_pte;
@@ -10461,9 +10463,10 @@ unsigned long __kvm_emulate_hypercall(struct kvm_vcpu *vcpu, unsigned long nr,
                 } else {
                     printk(KERN_INFO "Successfully allocated physical page: 0x%llx\n", map_hpa);
                 }*/
-		u64 *ept_pte;
-	        ept_pte = get_ept_pte(vcpu, map_gpa);
-		printk("ept_pte:%p\n",ept_pte);
+		//u64 *ept_pte;
+	        //ept_pte = get_ept_pte(vcpu, map_gpa);
+		//printk("ept_pte:%p\n",ept_pte);
+		get_ept_pte(vcpu,map_gpa);
                // ept_update_mapping(vcpu, map_gpa, map_hpa);                
                
                 //
