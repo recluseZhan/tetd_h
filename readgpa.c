@@ -9,7 +9,7 @@
 MODULE_LICENSE("GPL");
 
 #define DUMP_SIZE 1024
-#define RESERVED_PHYS_ADDR 0x19b425000 
+#define RESERVED_PHYS_ADDR 0x4104fa5000 
 static void __iomem *mapped_page = NULL;
 
 int kernel_pa2va(void){

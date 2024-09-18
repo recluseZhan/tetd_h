@@ -86,7 +86,20 @@
 #include <asm/sgx.h>
 #include <clocksource/hyperv_timer.h>
 //
+//#include <linux/nospec.h>
+//#include <asm/vmx.h>
+//#include "vmx/vmcs.h"
+//#include "vmx/vmx_onhyperv.h"
+//#include "vmx/vmx_ops.h"
 #include <asm/kvm_page_track.h>
+#include <asm/kvm_vcpu_regs.h>
+#include <linux/mm.h>
+#include <linux/kvm.h>
+#include <linux/io.h>
+#include <asm/kvm_host.h>
+#include "mmu.h"
+#include "mmu/tdp_mmu.h"
+
 
 #define CREATE_TRACE_POINTS
 #include "trace.h"
@@ -10117,18 +10130,7 @@ static int complete_hypercall_exit(struct kvm_vcpu *vcpu)
 	return kvm_skip_emulated_instruction(vcpu);
 }
 //xin
-typedef struct ept_entry {
-    phys_addr_t hpa : 52;      
-    unsigned int read_access : 1;
-    unsigned int write_access : 1;
-    unsigned int exec_access : 1;
-} ept_entry_t;
-ept_entry_t *kvm_vcpu_map_ept(struct kvm *kvm, gpa_t gpa, phys_addr_t hpa);
-static inline int gpa_index(gpa_t gpa, int level)
-{
-    return (gpa >> (PAGE_SHIFT + (level * 9))) & 0x1FF;
-}
-
+/*
 static phys_addr_t alloc_ept_page(void)
 {
     struct page *page = alloc_pages(GFP_KERNEL, 0);
@@ -10137,53 +10139,211 @@ static phys_addr_t alloc_ept_page(void)
 
     return page_to_phys(page);
 }
-
 static phys_addr_t get_eptp(void)
 {
     phys_addr_t eptp;
-    asm volatile("vmread %%rax, %0\n\t" : "=r"(eptp) : "a"(EPT_POINTER)); 
+    asm volatile("vmread %%rax, %0\n\t" : "=r" (eptp) : "a" (EPT_POINTER)); 
     return eptp;
 }
-
-ept_entry_t *kvm_vcpu_map_ept(struct kvm *kvm, gpa_t gpa, phys_addr_t hpa)
+struct invept_desc {
+    u64 eptp;
+    u64 reserved;
+};
+static inline void invept(u64 eptp)
 {
-    phys_addr_t *table;
-    phys_addr_t next_hpa = get_eptp();  
-    int level, index;
+    struct invept_desc desc = { eptp, 0 };
+    u64 type = 1;  // Type 1 for single-context invalidation.
 
-    if (next_hpa == ~(phys_addr_t)0) {
-        printk(KERN_ERR "Failed to retrieve EPTP\n");
+    asm volatile ("invept %[desc], %[type]"
+                  :
+                  : [desc] "m" (desc), [type] "r" (type)
+                  : "memory");
+}*/
+/*
+static hpa_t alloc_hpa_page(void)
+{
+    struct page *page;
+    void *vaddr;
+    hpa_t hpa;
+
+    page = alloc_pages(GFP_KERNEL | __GFP_ZERO, 0);
+    if (!page) {
+        printk(KERN_ERR "Failed to allocate 4KB page\n");
+        return ~(phys_addr_t)0;
+    }
+
+    vaddr = page_address(page);
+    if (!vaddr) {
+        printk(KERN_ERR "Failed to map page to virtual address\n");
+        __free_pages(page, 0);
+        return ~(phys_addr_t)0;
+    }
+
+    hpa = page_to_phys(page);
+    printk(KERN_INFO "Allocated 4KB page: HPA=0x%llx\n", hpa);
+    
+    memset(vaddr,0xff,PAGE_SIZE);
+	
+    return hpa;
+}
+*/
+/*
+#define PAGE_SHIFT 12
+#define EPT_L4_SHIFT 39
+#define EPT_L3_SHIFT 30
+#define EPT_L2_SHIFT 21
+#define EPT_L1_SHIFT 12
+#define EPT_INDEX_MASK 0x1FF
+//#define PAGE_SIZE 4096
+
+// 设置EPT页表项
+static void set_ept_pte(u64 *pte, u64 hpa) {
+    *pte = (hpa & PAGE_MASK) | PT_PRESENT_MASK | PT_WRITABLE_MASK | PT_USER_MASK;
+}
+
+// 创建一个新的页表，并返回指向该页表的虚拟地址
+static u64* allocate_new_ept_page(void) {
+    u64 *new_page = (u64 *)get_zeroed_page(GFP_KERNEL);  // 分配并初始化一个新的页表
+    if (!new_page) {
+        pr_err("Failed to allocate new EPT page\n");
+        return NULL;
+    }
+    return new_page;
+}
+
+// 通过索引位计算 EPT 页表项
+static u64* get_next_ept_table_or_create(u64 *table, unsigned long index) {
+    u64 entry = table[index];
+
+    // 如果该表项不存在，则创建新的页表
+    if (!(entry & PT_PRESENT_MASK)) {
+        u64 *new_page = allocate_new_ept_page();
+        if (!new_page)
+            return NULL;
+
+        // 设置新的页表项指向新分配的页表
+        table[index] = __pa(new_page) | PT_PRESENT_MASK | PT_WRITABLE_MASK | PT_USER_MASK;
+        return new_page;
+    }
+
+    // 如果存在，则返回该页表
+    return (u64 *)__va(entry & PAGE_MASK);
+}
+
+// 遍历 EPT 表，找到或创建 GPA 对应的 PTE
+static u64* get_or_create_ept_pte(struct kvm_vcpu *vcpu, unsigned long gpa) {
+    u64 *ept_l4, *ept_l3, *ept_l2, *ept_l1;
+    unsigned long l4_index, l3_index, l2_index, l1_index;
+
+    // 获取根页表地址
+    unsigned long root_hpa = vcpu->arch.mmu->root.hpa;
+    if (!root_hpa) {
+        pr_err("EPT root HPA is null\n");
         return NULL;
     }
 
-    for (level = 3; level >= 1; --level) {
-        table = (phys_addr_t *)phys_to_virt(next_hpa);
-        index = gpa_index(gpa, level);
-        next_hpa = table[index];
+    // 根页表转换为虚拟地址
+    ept_l4 = (u64 *)__va(root_hpa);
 
-        if (next_hpa == 0) {
-            next_hpa = alloc_ept_page();
-            if (next_hpa == ~(phys_addr_t)0) {
-                printk(KERN_ERR "Failed to allocate new EPT page at level %d\n", level);
-                return NULL;
-            }
+    // 计算各级索引
+    l4_index = (gpa >> EPT_L4_SHIFT) & EPT_INDEX_MASK;
+    l3_index = (gpa >> EPT_L3_SHIFT) & EPT_INDEX_MASK;
+    l2_index = (gpa >> EPT_L2_SHIFT) & EPT_INDEX_MASK;
+    l1_index = (gpa >> EPT_L1_SHIFT) & EPT_INDEX_MASK;
 
-            memset((void *)phys_to_virt(next_hpa), 0, PAGE_SIZE);
-            table[index] = next_hpa | 0x7;  
-        }
+    // 遍历 L4 → L3 → L2 → L1，如果某一级不存在则创建新的页表
+    ept_l3 = get_next_ept_table_or_create(ept_l4, l4_index);
+    if (!ept_l3) return NULL;
+
+    ept_l2 = get_next_ept_table_or_create(ept_l3, l3_index);
+    if (!ept_l2) return NULL;
+
+    ept_l1 = get_next_ept_table_or_create(ept_l2, l2_index);
+    if (!ept_l1) return NULL;
+
+    // 返回 L1 页表中的 PTE
+    return &ept_l1[l1_index];
+}
+
+// 将GPA映射到HPA，并在EPT中创建必要的页表项
+static int map_gpa_to_hpa(struct kvm_vcpu *vcpu, unsigned long gpa, unsigned long hpa) {
+    gfn_t gfn = gpa >> PAGE_SHIFT;  // GPA 转为页帧号
+    hpa >>= PAGE_SHIFT;  // HPA 页对齐
+    struct kvm_memory_slot *memslot;
+    u64 *pte;
+
+    // 获取 GPA 对应的内存槽
+    memslot = gfn_to_memslot(vcpu->kvm, gfn);
+    if (!memslot) {
+        pr_err("Memory slot not found for GPA: 0x%lx\n", gpa);
+        return -EINVAL;
     }
 
-    table = (phys_addr_t *)phys_to_virt(next_hpa);
-    index = gpa_index(gpa, 0);
-    ept_entry_t *ept_entry = (ept_entry_t *)&table[index];
+    // 获取或创建 EPT 页表项
+    pte = get_or_create_ept_pte(vcpu, gpa);
+    if (!pte) {
+        pr_err("Failed to get or create EPT PTE for GPA: 0x%lx\n", gpa);
+        return -EINVAL;
+    }
 
-    ept_entry->hpa = hpa >> PAGE_SHIFT;
-    ept_entry->read_access = 1;
-    ept_entry->write_access = 1;
-    ept_entry->exec_access = 1;
+    // 设置新的 HPA
+    set_ept_pte(pte, hpa << PAGE_SHIFT);  // 设置 PTE
 
-    return ept_entry;
-}
+    // 刷新 TLB
+    kvm_flush_remote_tlbs(vcpu->kvm);
+
+    pr_info("Mapped GPA 0x%lx to HPA 0x%lx\n", gpa, hpa);
+    return 0;
+}*/
+#define EPT_READ  (1ull << 0)
+#define EPT_WRITE (1ull << 1)
+#define EPT_EXEC  (1ull << 2)
+
+// 用于逐级查询 EPT 页表，并最终返回 PTE 地址
+static u64 *get_ept_pte(struct kvm_vcpu *vcpu, u64 gpa) {
+    u64 root_hpa = vcpu->arch.mmu->root.hpa; // EPT 根表物理地址
+    u64 *eptrt = phys_to_virt(root_hpa);     // 将 EPT 根表物理地址转为虚拟地址
+    int level = 4;                           // EPT 是四级页表
+    u64 *pte = eptrt;
+
+    // 逐级查询 EPT 页表
+    for (; level > 1; level--) {
+        int index = (gpa >> (12 + (level - 1) * 9)) & 0x1ff;  // 每级的索引
+
+        // 获取下一级页表物理地址
+        u64 pte_val = pte[index];
+        if (!(pte_val & EPT_READ)) {
+            printk(KERN_ERR "EPT: Invalid PTE during lookup for GPA: 0x%llx\n", gpa);
+            return NULL; // 如果页表项无效，返回 NULL
+        }
+
+        // 获取下一级页表的物理地址
+        u64 next_level_hpa = pte_val & PAGE_MASK;
+        pte = phys_to_virt(next_level_hpa);  // 转换为虚拟地址以供访问
+    }
+
+    // 返回最后一级页表项
+    return &pte[(gpa >> 12) & 0x1ff];
+}/*
+static void ept_update_mapping(struct kvm_vcpu *vcpu, u64 gpa, u64 hpa) {
+    u64 *ept_pte;
+
+    // 获取 EPT 页表项
+    ept_pte = get_ept_pte(vcpu, gpa);
+    if (!ept_pte) {
+        printk(KERN_ERR "EPT: Failed to find PTE for GPA: 0x%llx\n", gpa);
+        return;
+    }
+
+    // 更新页表项，指向新的 HPA，并设置权限标志
+    *ept_pte = hpa | EPT_READ | EPT_WRITE | EPT_EXEC;
+
+    // 刷新远程 TLB，以确保修改生效
+    kvm_flush_remote_tlbs(vcpu->kvm);
+    printk(KERN_INFO "EPT: Updated GPA 0x%llx to HPA 0x%llx\n", gpa, hpa);
+}*/
+
+
 //
 unsigned long __kvm_emulate_hypercall(struct kvm_vcpu *vcpu, unsigned long nr,
 				      unsigned long a0, unsigned long a1,
@@ -10194,9 +10354,14 @@ unsigned long __kvm_emulate_hypercall(struct kvm_vcpu *vcpu, unsigned long nr,
 	//printk(KERN_INFO "kvm_emulate_hy");
         phys_addr_t map_hpa;
 	gpa_t map_gpa;
+        //phys_addr_t eptp;
         //
 
 	unsigned long ret;
+
+	//xin
+
+	//
 
 	trace_kvm_hypercall(nr, a0, a1, a2, a3);
 
@@ -10277,17 +10442,23 @@ unsigned long __kvm_emulate_hypercall(struct kvm_vcpu *vcpu, unsigned long nr,
 		return 0;
 	}
 	default:
-	        //xin
+	        //xin1
                 printk(KERN_INFO "hypercall!!!\n");
                 map_hpa = a0; 
                 map_gpa = a1;         
-
-                ept_entry_t *entry = kvm_vcpu_map_ept(vcpu->kvm, map_gpa, map_hpa);
-                if (entry) {
-                    printk(KERN_INFO "Mapped GPA 0x%llx to HPA 0x%llx\n", map_gpa, map_hpa);
+                //eptp = get_eptp();
+                /*
+                map_hpa = alloc_hpa_page();
+                if (map_hpa == ~(phys_addr_t)0) {
+                    printk(KERN_ERR "Failed to allocate physical page\n");
                 } else {
-                    printk(KERN_ERR "Failed to map GPA 0x%llx\n", map_gpa);
-                } 
+                    printk(KERN_INFO "Successfully allocated physical page: 0x%llx\n", map_hpa);
+                }*/
+		u64 *ept_pte;
+	        ept_pte = get_ept_pte(vcpu, map_gpa);
+		printk("ept_pte:%p\n",ept_pte);
+               // ept_update_mapping(vcpu, map_gpa, map_hpa);                
+               
                 //
 		ret = -KVM_ENOSYS;
 		break;
