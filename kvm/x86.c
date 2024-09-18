@@ -10302,7 +10302,7 @@ static int map_gpa_to_hpa(struct kvm_vcpu *vcpu, unsigned long gpa, unsigned lon
 // 用于逐级查询 EPT 页表，并最终返回 PTE 地址
 static u64 *get_ept_pte(struct kvm_vcpu *vcpu, u64 gpa) {
     u64 root_hpa = vcpu->arch.mmu->root.hpa; // EPT 根表物理地址
-    u64 *eptrt = phys_to_virt(root_hpa);     // 将 EPT 根表物理地址转为虚拟地址
+    u64 *eptrt = ioremap(root_hpa,PAGE_SIZE);     // 将 EPT 根表物理地址转为虚拟地址
     int level = 4;                           // EPT 是四级页表
     u64 *pte = eptrt;
 
@@ -10313,13 +10313,19 @@ static u64 *get_ept_pte(struct kvm_vcpu *vcpu, u64 gpa) {
         // 获取下一级页表物理地址
         u64 pte_val = pte[index];
         if (!(pte_val & EPT_READ)) {
-            printk(KERN_ERR "EPT: Invalid PTE during lookup for GPA: 0x%llx\n", gpa);
-            return NULL; // 如果页表项无效，返回 NULL
+	    u64 new_hpa = __get_free_page(GFP_KERNEL);
+	    if(!new_hpa){
+	        printk(KERN_ERR "failed to alloc new hpa for gpa 0x%llx\n", gpa);
+		return NULL;
+	    }
+	    pte[index] = virt_to_phys((void *)new_hpa) | EPT_READ | EPT_WRITE | EPT_EXEC;
+	    pte_val = pte[index];
         }
 
         // 获取下一级页表的物理地址
         u64 next_level_hpa = pte_val & PAGE_MASK;
-        pte = phys_to_virt(next_level_hpa);  // 转换为虚拟地址以供访问
+	iounmap(pte);
+        pte = ioremap(next_level_hpa,PAGE_SIZE);  // 转换为虚拟地址以供访问
     }
 
     // 返回最后一级页表项
@@ -10337,7 +10343,8 @@ static void ept_update_mapping(struct kvm_vcpu *vcpu, u64 gpa, u64 hpa) {
 
     // 更新页表项，指向新的 HPA，并设置权限标志
     *ept_pte = hpa | EPT_READ | EPT_WRITE | EPT_EXEC;
-
+    
+    iounmap(ept_pte);
     // 刷新远程 TLB，以确保修改生效
     kvm_flush_remote_tlbs(vcpu->kvm);
     printk(KERN_INFO "EPT: Updated GPA 0x%llx to HPA 0x%llx\n", gpa, hpa);
