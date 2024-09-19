@@ -10365,6 +10365,79 @@ static void ept_update_mapping(struct kvm_vcpu *vcpu, u64 gpa, u64 hpa) {
     printk(KERN_INFO "EPT: Updated GPA 0x%llx to HPA 0x%llx\n", gpa, hpa);
 }*/
 
+#define EPT_ACCESS_MASK (EPT_READ | EPT_WRITE | EPT_EXEC)
+
+#define EPT_READ  (1ull << 0)
+#define EPT_WRITE (1ull << 1)
+#define EPT_EXEC  (1ull << 2)
+
+#define EPT_PML4_SHIFT 39
+#define EPT_PDPT_SHIFT 30
+#define EPT_PD_SHIFT 21
+#define EPT_PT_SHIFT 12
+
+#define EPT_PAGE_TABLE_LEVELS 4
+
+#define EPT_PML4_MASK ((1ULL << (EPT_PDPT_SHIFT - EPT_PML4_SHIFT)) - 1)
+#define EPT_PDPT_MASK ((1ULL << (EPT_PD_SHIFT - EPT_PDPT_SHIFT)) - 1)
+#define EPT_PD_MASK ((1ULL << (EPT_PT_SHIFT - EPT_PD_SHIFT)) - 1)
+#define EPT_PT_MASK ((1ULL << (PAGE_SHIFT - EPT_PT_SHIFT)) - 1)
+
+static u64 *get_ept_pte(struct kvm_vcpu *vcpu, u64 gpa)
+{
+    u64 root_hpa = vcpu->arch.mmu->root.hpa; // EPT 根表物理地址
+    u64 *eptrt = phys_to_virt(root_hpa);     // 将 EPT 根表物理地址转为虚拟地址
+    int level;
+    u64 *pte;
+
+    for (level = EPT_PAGE_TABLE_LEVELS - 1; level > 0; level--) {
+        int index = (gpa >> (EPT_PT_SHIFT + (level - 1) * 9)) & 0x1FF;
+        pte = &eptrt[index];
+
+        // 检查页表项是否有效
+        if ((*pte & (EPT_READ | EPT_WRITE | EPT_EXEC)) == 0) {
+            printk(KERN_ERR "EPT: Invalid PTE during lookup for GPA: 0x%llx\n", gpa);
+            return NULL;
+        }
+
+        // 检查页表项是否指向下一级页表
+        if ((*pte & (1ULL << 7)) == 0) {
+            // 页表项是最终的页表项，不是指向下一级页表的指针
+            break;
+        }
+
+        // 获取下一级页表的物理地址，并转换为虚拟地址
+        eptrt = phys_to_virt((*pte & PAGE_MASK));
+    }
+
+    // 返回找到的页表项
+    return pte;
+}
+static void replace_gpa_with_hpa(struct kvm_vcpu *vcpu, u64 gpa, u64 new_hpa) {
+    u64 *ept_pte;
+
+    // 获取GPA对应的EPT页表项
+    ept_pte = get_ept_pte(vcpu, gpa);
+    if (!ept_pte) {
+        printk(KERN_ERR "EPT: Failed to find PTE for GPA: 0x%llx\n", gpa);
+        return;
+    }
+    printk(KERN_INFO "pte=%p *pte=%llx",ept_pte, *ept_pte);
+    // 确保新HPA是页对齐的
+    if (new_hpa & (PAGE_SIZE - 1)) {
+        printk(KERN_ERR "EPT: New HPA is not page aligned: 0x%llx\n", new_hpa);
+        return;
+    }
+
+    // 更新EPT页表项，指向新的HPA
+    // 注意：这里保留了原有的访问权限，实际情况下你可能需要根据需要调整权限
+    //*ept_pte = (*ept_pte & ~(PAGE_MASK | EPT_ACCESS_MASK)) | new_hpa;
+
+    // 刷新远程TLB，以确保修改生效
+    //kvm_flush_remote_tlbs(vcpu->kvm);
+
+    printk(KERN_INFO "EPT: Replaced GPA 0x%llx with HPA 0x%llx\n", gpa, new_hpa);
+}
 
 //
 #define DUMP_SIZE 512
@@ -10387,7 +10460,7 @@ unsigned long __kvm_emulate_hypercall(struct kvm_vcpu *vcpu, unsigned long nr,
 	unsigned long ret;
 
 	//xin
-
+        //u64 *ept_pte;
 	//
 
 	trace_kvm_hypercall(nr, a0, a1, a2, a3);
@@ -10488,7 +10561,7 @@ unsigned long __kvm_emulate_hypercall(struct kvm_vcpu *vcpu, unsigned long nr,
 		//u64 *ept_pte;
 	        //ept_pte = get_ept_pte(vcpu, map_gpa);
 		//printk("ept_pte:%p\n",ept_pte);
-		//get_ept_pte(vcpu,map_gpa);
+                replace_gpa_with_hpa(vcpu, map_gpa, map_hpa);		
                // ept_update_mapping(vcpu, map_gpa, map_hpa);                
 		mapped_page = ioremap(map_hpa,DUMP_SIZE);
 		if(!mapped_page){
