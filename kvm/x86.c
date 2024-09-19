@@ -10432,10 +10432,21 @@ static void replace_gpa_with_hpa(struct kvm_vcpu *vcpu, u64 gpa, u64 new_hpa) {
     // 更新EPT页表项，指向新的HPA
     // 注意：这里保留了原有的访问权限，实际情况下你可能需要根据需要调整权限
     //*ept_pte = (*ept_pte & ~(PAGE_MASK | EPT_ACCESS_MASK)) | new_hpa;
+    //*ept_pte = (new_hpa & PAGE_MASK) | EPT_READ | EPT_WRITE | EPT_EXEC;
+     // 清除访问权限标志
+    //*ept_pte &= ~(EPT_READ | EPT_WRITE | EPT_EXEC);
 
+    // 更新EPT页表项，指向新的HPA
+    //*ept_pte = (*ept_pte & ~(PAGE_MASK)) | new_hpa;
+
+    //u64 access_flags = *ept_pte & (EPT_READ | EPT_WRITE | EPT_EXEC);
+    //u64 access_flags = *ept_pte & fff;
+    *ept_pte = (*ept_pte & ~PAGE_MASK) | (new_hpa & PAGE_MASK);
+    //*ept_pte = (new_hpa & PAGE_MASK) | (EPT_READ | EPT_WRITE | EPT_EXEC);
     // 刷新远程TLB，以确保修改生效
+    //kvm_vcpu_flush_tlb(vcpu);
     //kvm_flush_remote_tlbs(vcpu->kvm);
-
+    printk("ept_pte=%p *ept_pte=%llx",ept_pte,*ept_pte);
     printk(KERN_INFO "EPT: Replaced GPA 0x%llx with HPA 0x%llx\n", gpa, new_hpa);
 }
 
