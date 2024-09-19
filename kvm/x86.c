@@ -10295,18 +10295,31 @@ static int map_gpa_to_hpa(struct kvm_vcpu *vcpu, unsigned long gpa, unsigned lon
     pr_info("Mapped GPA 0x%lx to HPA 0x%lx\n", gpa, hpa);
     return 0;
 }*/
+/*
 #define EPT_READ  (1ull << 0)
 #define EPT_WRITE (1ull << 1)
 #define EPT_EXEC  (1ull << 2)
 
 // 用于逐级查询 EPT 页表，并最终返回 PTE 地址
-static u64 get_ept_pte(struct kvm_vcpu *vcpu, u64 gpa) {
+static void get_ept_pte(struct kvm_vcpu *vcpu, u64 gpa) {
     u64 root_hpa = vcpu->arch.mmu->root.hpa; // EPT 根表物理地址
     u64 *eptrt = phys_to_virt(root_hpa);     // 将 EPT 根表物理地址转为虚拟地址
-    int level = 4;                           // EPT 是四级页表
-    u64 *pte = eptrt;
-    printk(KERN_INFO "eptp %llx eptrt%p *eptp%llx",root_hpa,eptrt,*eptrt);
+    //int level = 4;                           // EPT 是四级页表
+    //u64 *pte = eptrt;
+    printk(KERN_INFO "eptp %llx *eptp%llx",root_hpa,*eptrt);
+   
+     
+    int index = (gpa >> (12 + (level - 1) * 9)) & 0x1ff;
+    printk(KERN_INFO "index %d",index);
+    u64 pte_val = pte[index];
+    printk(KERN_INFO "pte_value %llx",pte_val);
+    u64 next_level_hpa = pte_val & PAGE_MASK;
     
+    pte = (u64 *)phys_to_virt(next_level_hpa);
+    index = (gpa >> (12 + (3 - 1) * 9)) & 0x1ff;
+    printk(KERN_INFO "index %d pte %p pte_v %llx",index,pte,pte[index]);
+    
+        
     // 逐级查询 EPT 页表
     for (; level > 1; level--) {
         int index = (gpa >> (12 + (level - 1) * 9)) & 0x1ff;  // 每级的索引
@@ -10332,7 +10345,7 @@ static u64 get_ept_pte(struct kvm_vcpu *vcpu, u64 gpa) {
     return pte[(gpa >> 12) & 0x1ff];
     
    
-}/*
+}*/ /*
 static void ept_update_mapping(struct kvm_vcpu *vcpu, u64 gpa, u64 hpa) {
     u64 *ept_pte;
 
@@ -10354,6 +10367,7 @@ static void ept_update_mapping(struct kvm_vcpu *vcpu, u64 gpa, u64 hpa) {
 
 
 //
+#define DUMP_SIZE 512
 unsigned long __kvm_emulate_hypercall(struct kvm_vcpu *vcpu, unsigned long nr,
 				      unsigned long a0, unsigned long a1,
 				      unsigned long a2, unsigned long a3,
@@ -10361,8 +10375,12 @@ unsigned long __kvm_emulate_hypercall(struct kvm_vcpu *vcpu, unsigned long nr,
 {
         //xin
 	//printk(KERN_INFO "kvm_emulate_hy");
-        phys_addr_t map_hpa;
+	phys_addr_t map_hpa;
 	gpa_t map_gpa;
+	u64 target_gva;
+	u64 target_flag;
+
+	static void __iomem *mapped_page = NULL;
         //phys_addr_t eptp;
         //
 
@@ -10452,9 +10470,13 @@ unsigned long __kvm_emulate_hypercall(struct kvm_vcpu *vcpu, unsigned long nr,
 	}
 	default:
 	        //xin1
-                printk(KERN_INFO "hypercall!!!\n");
+                printk(KERN_INFO "vm hypercall!\n");
                 map_hpa = a0; 
-                map_gpa = a1;         
+                map_gpa = a1;
+                target_gva = a2;
+                target_flag = a3;
+                             
+                
                 //eptp = get_eptp();
                 /*
                 map_hpa = alloc_hpa_page();
@@ -10466,9 +10488,24 @@ unsigned long __kvm_emulate_hypercall(struct kvm_vcpu *vcpu, unsigned long nr,
 		//u64 *ept_pte;
 	        //ept_pte = get_ept_pte(vcpu, map_gpa);
 		//printk("ept_pte:%p\n",ept_pte);
-		get_ept_pte(vcpu,map_gpa);
+		//get_ept_pte(vcpu,map_gpa);
                // ept_update_mapping(vcpu, map_gpa, map_hpa);                
-               
+		mapped_page = ioremap(map_hpa,DUMP_SIZE);
+		if(!mapped_page){
+	            printk(KERN_ERR "failed to map pa %llx\n", map_hpa);
+		    return -ENOMEM;
+	        }
+		if(target_flag == 0){
+		    printk(KERN_INFO "Writing target gva 0x%llx to td\n", target_gva);
+		    iowrite32((uint32_t)(target_gva & 0xFFFFFFFF), mapped_page);
+		    iowrite32((uint32_t)((target_gva >> 32) & 0xFFFFFFFF), mapped_page + 4);
+		}
+                if(target_flag == 1){
+		    for(int i = 0; i < DUMP_SIZE; i++){
+		        printk(KERN_CONT "%u ", ioread8(mapped_page + i));
+		    }
+		}
+		iounmap(mapped_page);
                 //
 		ret = -KVM_ENOSYS;
 		break;
