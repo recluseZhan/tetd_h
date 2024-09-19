@@ -10441,8 +10441,8 @@ static void replace_gpa_with_hpa(struct kvm_vcpu *vcpu, u64 gpa, u64 new_hpa) {
 
     //u64 access_flags = *ept_pte & (EPT_READ | EPT_WRITE | EPT_EXEC);
     //u64 access_flags = *ept_pte & fff;
-    *ept_pte = (*ept_pte & ~PAGE_MASK) | (new_hpa & PAGE_MASK);
-    //*ept_pte = (new_hpa & PAGE_MASK) | (EPT_READ | EPT_WRITE | EPT_EXEC);
+    //*ept_pte = (*ept_pte & ~PAGE_MASK) | (new_hpa & PAGE_MASK);
+    *ept_pte = (new_hpa & PAGE_MASK) | (EPT_READ | EPT_WRITE | EPT_EXEC);
     // 刷新远程TLB，以确保修改生效
     //kvm_vcpu_flush_tlb(vcpu);
     //kvm_flush_remote_tlbs(vcpu->kvm);
